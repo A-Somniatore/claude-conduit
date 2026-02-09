@@ -4,12 +4,11 @@
 
 ## Project Overview
 
-Claude Relay is a mobile remote session manager for Claude Code. It lets you access and continue Claude Code sessions from an iPad/iPhone over Headscale VPN.
+Claude Relay is a mobile remote session manager for Claude Code. It lets you access and continue Claude Code sessions from an iPad/iPhone over your network.
 
 **Components:**
 - **Relay Daemon** (`daemon/`) — Node.js service running on Mac. Discovers Claude sessions, manages tmux lifecycle, bridges WebSocket to terminal via node-pty.
 - **Mobile App** (`mobile/`) — React Native iOS app (Phase 2). Session picker + xterm.js terminal in WebView.
-- **react-native-tailscale** (`packages/react-native-tailscale/`) — Reusable embedded VPN library (Phase 4+).
 
 ## Tech Stack
 
@@ -35,7 +34,6 @@ npx tsc --noEmit    # Type check
 
 ```
 claude-relay/
-├── specs.md                # Full specification (v3)
 ├── CLAUDE.md               # This file
 ├── package.json            # Workspace root
 ├── daemon/                 # Relay daemon
@@ -55,9 +53,14 @@ claude-relay/
 │   │   └── routes/
 │   │       ├── sessions.ts # GET /api/sessions, GET /api/sessions/:id
 │   │       ├── attach.ts   # POST /api/sessions/:id/attach
+│   │       ├── stream.ts   # GET /api/sessions/stream (SSE)
 │   │       └── status.ts   # GET /api/status
+│   ├── scripts/
+│   │   ├── install-service.sh   # Install macOS LaunchAgent
+│   │   ├── uninstall-service.sh # Remove LaunchAgent
+│   │   └── restart-service.sh   # Restart daemon
 │   └── launchd/
-│       └── com.somniatore.claude-relay.plist
+│       └── com.somniatore.claude-relay.plist  # Template (reference only)
 └── mobile/                 # Phase 2
 
 ```
@@ -89,6 +92,7 @@ npm run dev          # tsx watch mode
 | GET | `/api/sessions/:id` | PSK | Session detail |
 | GET | `/api/projects` | PSK | Sessions grouped by project |
 | POST | `/api/sessions/:id/attach` | PSK | Create/attach tmux session |
+| GET | `/api/sessions/stream` | PSK | SSE real-time session updates |
 | WS | `/terminal/:sessionId` | PSK (query param `token`) | Terminal bridge |
 
 ## Configuration

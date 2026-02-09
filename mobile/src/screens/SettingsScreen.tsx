@@ -6,12 +6,14 @@ import {
   TouchableOpacity,
   Alert,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, spacing, fontSize, borderRadius, fontFamily } from '../theme';
 import { useConnectionStore } from '../stores/connection';
 import { clearConfig } from '../services/storage';
 
 export function SettingsScreen({ onBack }: { onBack: () => void }) {
   const { daemonHost, status, reset } = useConnectionStore();
+  const insets = useSafeAreaInsets();
 
   const handleDisconnect = () => {
     Alert.alert(
@@ -32,13 +34,13 @@ export function SettingsScreen({ onBack }: { onBack: () => void }) {
   };
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: insets.top }]}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={onBack} activeOpacity={0.7}>
+        <TouchableOpacity style={styles.backButton} onPress={onBack} activeOpacity={0.7}>
           <Text style={styles.backText}>← Back</Text>
         </TouchableOpacity>
         <Text style={styles.title}>Settings</Text>
-        <View style={styles.spacer} />
+        <View style={styles.headerRight} />
       </View>
 
       <View style={styles.section}>
@@ -104,9 +106,14 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: spacing.lg,
-    paddingTop: spacing.xl,
-    paddingBottom: spacing.md,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    backgroundColor: colors.bgElevated,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+  },
+  backButton: {
+    width: 60,
   },
   backText: {
     color: colors.accent,
@@ -114,11 +121,11 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   title: {
-    fontSize: fontSize.xl,
+    fontSize: fontSize.lg,
     fontWeight: '700',
     color: colors.textPrimary,
   },
-  spacer: {
+  headerRight: {
     width: 60,
   },
   section: {

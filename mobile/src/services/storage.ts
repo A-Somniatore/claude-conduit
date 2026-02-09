@@ -1,6 +1,9 @@
 import * as Keychain from 'react-native-keychain';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import type { Session } from '../types/session';
 
 const KEYCHAIN_SERVICE = 'com.somniatore.claude-relay';
+const SESSIONS_CACHE_KEY = '@claude-relay/sessions-cache';
 
 interface StoredConfig {
   daemonHost: string;
@@ -35,4 +38,20 @@ export async function hasConfig(): Promise<boolean> {
 /** Clear stored config. */
 export async function clearConfig(): Promise<void> {
   await Keychain.resetGenericPassword({ service: KEYCHAIN_SERVICE });
+}
+
+/** Save sessions to AsyncStorage for instant cold-start display. */
+export async function saveSessionsCache(sessions: Session[]): Promise<void> {
+  await AsyncStorage.setItem(SESSIONS_CACHE_KEY, JSON.stringify(sessions));
+}
+
+/** Load cached sessions from AsyncStorage. Returns empty array if no cache. */
+export async function loadSessionsCache(): Promise<Session[]> {
+  const raw = await AsyncStorage.getItem(SESSIONS_CACHE_KEY);
+  if (!raw) return [];
+  try {
+    return JSON.parse(raw) as Session[];
+  } catch {
+    return [];
+  }
 }

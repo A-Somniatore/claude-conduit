@@ -6,7 +6,6 @@ export interface SessionMetadata {
   lastMessageRole: "user" | "assistant" | "unknown";
   timestamp: Date;
   cliVersion: string;
-  tmuxStatus: "active" | "detached" | "none";
 }
 
 export interface SessionIndex {

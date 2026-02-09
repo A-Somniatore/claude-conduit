@@ -1,7 +1,10 @@
 import { create } from 'zustand';
 import { RelayClient } from '../services/relay';
 import type { DaemonStatus } from '../types/session';
-import { loadConfig, saveConfig, hasConfig } from '../services/storage';
+import { loadConfig, saveConfig } from '../services/storage';
+import NetInfo from '@react-native-community/netinfo';
+
+const BACKOFF_SCHEDULE = [5000, 10000, 20000, 30000]; // ms
 
 interface ConnectionState {
   // Connection status
@@ -20,7 +23,13 @@ interface ConnectionState {
   checkConnection: () => Promise<boolean>;
   configure: (host: string, psk: string) => Promise<void>;
   reset: () => void;
+  startAutoReconnect: () => void;
+  stopAutoReconnect: () => void;
 }
+
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let reconnectAttempt = 0;
+let netInfoUnsubscribe: (() => void) | null = null;
 
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   isReachable: false,
@@ -59,6 +68,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (reachable) {
         const status = await client.getStatus();
         set({ isReachable: true, status, isChecking: false });
+        // Reset backoff on successful connection
+        reconnectAttempt = 0;
         return true;
       }
       set({ isReachable: false, status: null, isChecking: false });
@@ -81,6 +92,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   reset: () => {
+    get().stopAutoReconnect();
     set({
       isReachable: false,
       isConfigured: false,
@@ -90,5 +102,50 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       psk: '',
       client: null,
     });
+  },
+
+  startAutoReconnect: () => {
+    const { stopAutoReconnect } = get();
+    stopAutoReconnect();
+
+    const scheduleRetry = () => {
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      const delay = BACKOFF_SCHEDULE[Math.min(reconnectAttempt, BACKOFF_SCHEDULE.length - 1)];
+      reconnectAttempt++;
+      reconnectTimer = setTimeout(async () => {
+        const connected = await get().checkConnection();
+        if (!connected) {
+          scheduleRetry();
+        }
+      }, delay);
+    };
+
+    // Listen for network state changes — retry immediately when network comes back
+    netInfoUnsubscribe = NetInfo.addEventListener((state) => {
+      if (state.isConnected && !get().isReachable) {
+        reconnectAttempt = 0;
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        get().checkConnection().then((connected) => {
+          if (!connected) scheduleRetry();
+        });
+      }
+    });
+
+    // Start retry loop if not currently reachable
+    if (!get().isReachable) {
+      scheduleRetry();
+    }
+  },
+
+  stopAutoReconnect: () => {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
+    if (netInfoUnsubscribe) {
+      netInfoUnsubscribe();
+      netInfoUnsubscribe = null;
+    }
+    reconnectAttempt = 0;
   },
 }));

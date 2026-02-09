@@ -3,6 +3,7 @@ import {
   View,
   Text,
   TextInput,
+  Image,
   StyleSheet,
   TouchableOpacity,
   ActivityIndicator,
@@ -22,7 +23,7 @@ interface CheckItem {
 
 export function SetupScreen() {
   const { configure } = useConnectionStore();
-  const [host, setHost] = useState('100.64.0.2:7860');
+  const [host, setHost] = useState('100.64.0.9:7860');
   const [psk, setPsk] = useState('');
   const [checks, setChecks] = useState<CheckItem[]>([
     { label: 'Mac reachable', status: 'pending' },
@@ -110,7 +111,11 @@ export function SetupScreen() {
       style={styles.container}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <View style={styles.content}>
-        <Text style={styles.title}>Setup Claude Relay</Text>
+        <Image
+          source={require('../assets/logo.png')}
+          style={styles.logo}
+        />
+        <Text style={styles.title}>Claude Conduit</Text>
         <Text style={styles.subtitle}>
           Connect to your Mac's relay daemon to access Claude sessions.
         </Text>
@@ -122,7 +127,7 @@ export function SetupScreen() {
             style={styles.input}
             value={host}
             onChangeText={setHost}
-            placeholder="100.64.0.2:7860"
+            placeholder="100.64.0.9:7860"
             placeholderTextColor={colors.textMuted}
             autoCapitalize="none"
             autoCorrect={false}
@@ -216,17 +221,25 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     width: '100%',
   },
+  logo: {
+    width: 80,
+    height: 80,
+    alignSelf: 'center',
+    marginBottom: spacing.md,
+  },
   title: {
     fontSize: fontSize.xxl,
     fontWeight: '700',
     color: colors.textPrimary,
     marginBottom: spacing.xs,
+    textAlign: 'center',
   },
   subtitle: {
     fontSize: fontSize.md,
     color: colors.textSecondary,
     marginBottom: spacing.xl,
     lineHeight: 22,
+    textAlign: 'center',
   },
   field: {
     marginBottom: spacing.md,

@@ -4,35 +4,32 @@ import {
   Text,
   StyleSheet,
   TouchableOpacity,
-  Linking,
   ActivityIndicator,
 } from 'react-native';
 import { colors, spacing, fontSize, borderRadius } from '../theme';
 import { useConnectionStore } from '../stores/connection';
 
-export function VpnCheckScreen() {
+export function ConnectionErrorScreen() {
   const { isChecking, checkConnection } = useConnectionStore();
-  const retryTimer = useRef<ReturnType<typeof setInterval>>(undefined);
+  const retryTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const attemptRef = useRef(0);
 
   useEffect(() => {
-    // Auto-retry every 5 seconds
-    retryTimer.current = setInterval(() => {
-      checkConnection();
-    }, 5000);
+    // Exponential backoff: 5s, 10s, 20s, 30s cap
+    function scheduleRetry() {
+      const delay = Math.min(5000 * Math.pow(2, attemptRef.current), 30000);
+      retryTimer.current = setTimeout(async () => {
+        attemptRef.current++;
+        await checkConnection();
+        scheduleRetry();
+      }, delay);
+    }
+    scheduleRetry();
 
     return () => {
-      if (retryTimer.current) clearInterval(retryTimer.current);
+      if (retryTimer.current) clearTimeout(retryTimer.current);
     };
   }, [checkConnection]);
-
-  const openTailscale = () => {
-    Linking.openURL('tailscale://').catch(() => {
-      // Tailscale app not installed — open App Store
-      Linking.openURL(
-        'https://apps.apple.com/app/tailscale/id1470499037',
-      );
-    });
-  };
 
   return (
     <View style={styles.container}>
@@ -44,32 +41,25 @@ export function VpnCheckScreen() {
 
         <Text style={styles.title}>Cannot reach your Mac</Text>
         <Text style={styles.subtitle}>
-          Open the Tailscale app and connect to your Headscale network, then
-          tap Retry.
+          Make sure the Claude Relay daemon is running and your device can reach
+          it over the network.
         </Text>
 
         <View style={styles.buttons}>
           <TouchableOpacity
             style={styles.primaryButton}
-            onPress={openTailscale}
-            activeOpacity={0.8}>
-            <Text style={styles.primaryButtonText}>Open Tailscale</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.secondaryButton}
             onPress={checkConnection}
             disabled={isChecking}
             activeOpacity={0.8}>
             {isChecking ? (
-              <ActivityIndicator color={colors.textPrimary} size="small" />
+              <ActivityIndicator color={colors.textInverse} size="small" />
             ) : (
-              <Text style={styles.secondaryButtonText}>Retry</Text>
+              <Text style={styles.primaryButtonText}>Retry</Text>
             )}
           </TouchableOpacity>
         </View>
 
-        <Text style={styles.hint}>Auto-retrying every 5 seconds...</Text>
+        <Text style={styles.hint}>Auto-retrying with backoff...</Text>
       </View>
     </View>
   );
@@ -123,26 +113,13 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.md,
     paddingHorizontal: spacing.lg,
     borderRadius: borderRadius.md,
+    minWidth: 100,
+    alignItems: 'center',
   },
   primaryButtonText: {
     color: colors.textInverse,
     fontSize: fontSize.md,
     fontWeight: '600',
-  },
-  secondaryButton: {
-    backgroundColor: colors.bgSurface,
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.lg,
-    borderRadius: borderRadius.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    minWidth: 80,
-    alignItems: 'center',
-  },
-  secondaryButtonText: {
-    color: colors.textPrimary,
-    fontSize: fontSize.md,
-    fontWeight: '500',
   },
   hint: {
     fontSize: fontSize.xs,

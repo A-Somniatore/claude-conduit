@@ -1,78 +1,113 @@
-import React, { useRef, useState, useEffect, useCallback } from 'react';
+import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
+  TextInput,
   StyleSheet,
   TouchableOpacity,
   ActivityIndicator,
+  Keyboard,
   useWindowDimensions,
+  NativeSyntheticEvent,
+  TextInputKeyPressEventData,
   Platform,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView, type WebViewMessageEvent } from 'react-native-webview';
 import { colors, spacing, fontSize, borderRadius } from '../theme';
-import { useSessionsStore } from '../stores/sessions';
 import { useConnectionStore } from '../stores/connection';
 import type { Session } from '../types/session';
-import { KeyboardToolbar } from '../components/KeyboardToolbar';
+import { XTERM_JS, XTERM_CSS, FIT_ADDON_JS, WEB_LINKS_ADDON_JS } from '../assets/xterm/xterm-bundle';
 
-type TerminalState = 'connecting' | 'attached' | 'error' | 'disconnected';
+type TerminalState = 'connecting' | 'attached' | 'error' | 'disconnected' | 'reconnecting';
+
+const MAX_RECONNECT = 3;
 
 export function TerminalScreen({
   session,
+  attachToken: preAttachToken,
   onBack,
 }: {
   session: Session;
+  attachToken?: string;
   onBack: () => void;
 }) {
   const { client } = useConnectionStore();
   const webViewRef = useRef<WebView>(null);
+  const inputRef = useRef<TextInput>(null);
   const [state, setState] = useState<TerminalState>('connecting');
   const [errorMsg, setErrorMsg] = useState('');
-  const { width, height } = useWindowDimensions();
-
-  // Calculate terminal dimensions from screen size
-  const charWidth = 8.4; // Menlo 14px approximate
-  const charHeight = 18;
-  const cols = Math.floor((width - 16) / charWidth);
-  const rows = Math.floor((height - 140) / charHeight); // account for header + toolbar
+  const [inputText, setInputText] = useState('');
+  const [reconnectCount, setReconnectCount] = useState(0);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const focusTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const usedPreToken = useRef(false);
+  const { width } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
 
   const [wsUrl, setWsUrl] = useState<string | null>(null);
+  const attachedRef = useRef(false);
 
-  useEffect(() => {
-    let cancelled = false;
+  const doAttach = useCallback(async () => {
+    if (!client) {
+      setState('error');
+      setErrorMsg('Not connected to daemon');
+      return;
+    }
 
-    async function attach() {
-      if (!client) {
-        setState('error');
-        setErrorMsg('Not connected to daemon');
+    // Prevent double-attach from layout re-renders
+    if (attachedRef.current) return;
+    attachedRef.current = true;
+
+    // Initial cols/rows for the PTY — fitAddon.fit() sends the real
+    // dimensions immediately after WS connects, so these are just hints.
+    const defaultCols = Math.max(40, Math.floor((width - 16) / 8.4));
+    const defaultRows = 24;
+
+    try {
+      // If we have a pre-existing attach token (from new session creation)
+      // and haven't used it yet, skip the attach API call and connect directly.
+      if (preAttachToken && !usedPreToken.current) {
+        usedPreToken.current = true;
+        const url = client.terminalWsUrl(session.id, preAttachToken, defaultCols, defaultRows);
+        setWsUrl(url);
         return;
       }
 
-      try {
-        const result = await client.attach(session.id);
-        if (cancelled) return;
+      const result = await client.attach(session.id);
+      const url = client.terminalWsUrl(
+        session.id,
+        result.attachToken,
+        defaultCols,
+        defaultRows,
+      );
+      setWsUrl(url);
+    } catch (err) {
+      attachedRef.current = false; // Allow retry on error
+      setState('error');
+      setErrorMsg(err instanceof Error ? err.message : 'Failed to attach');
+    }
+  }, [client, session.id, preAttachToken]);
 
-        const url = client.terminalWsUrl(
-          session.id,
-          result.attachToken,
-          cols,
-          rows,
-        );
-        setWsUrl(url);
-      } catch (err) {
-        if (cancelled) return;
-        setState('error');
-        setErrorMsg(
-          err instanceof Error ? err.message : 'Failed to attach',
-        );
-      }
+  useEffect(() => {
+    attachedRef.current = false; // Reset on mount
+
+    let cancelled = false;
+    async function attach() {
+      if (cancelled) return;
+      await doAttach();
     }
 
     attach();
     return () => {
       cancelled = true;
+      // Close the WebSocket inside the WebView before unmount
+      webViewRef.current?.injectJavaScript('if(window._ws) window._ws.close(); true;');
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+      if (focusTimer.current) clearTimeout(focusTimer.current);
     };
-  }, [client, session.id, cols, rows]);
+  }, [doAttach]);
 
   const onMessage = useCallback((event: WebViewMessageEvent) => {
     try {
@@ -80,10 +115,29 @@ export function TerminalScreen({
       switch (msg.type) {
         case 'connected':
           setState('attached');
+          setReconnectCount(0);
+          focusTimer.current = setTimeout(() => inputRef.current?.focus(), 500);
           break;
-        case 'disconnected':
-          setState('disconnected');
+        case 'disconnected': {
+          const code = msg.code as number | undefined;
+          // Don't reconnect on auth/conflict errors (4xxx)
+          if (code && code >= 4400 && code < 4500) {
+            setState('error');
+            setErrorMsg(msg.reason || `Connection refused (code ${code})`);
+          } else if (reconnectCount < MAX_RECONNECT) {
+            setState('reconnecting');
+            const delay = Math.min(1000 * Math.pow(2, reconnectCount), 10000);
+            reconnectTimer.current = setTimeout(() => {
+              setReconnectCount(c => c + 1);
+              setWsUrl(null);
+              attachedRef.current = false;
+              doAttach();
+            }, delay);
+          } else {
+            setState('disconnected');
+          }
           break;
+        }
         case 'error':
           setState('error');
           setErrorMsg(msg.message || 'Terminal error');
@@ -92,21 +146,91 @@ export function TerminalScreen({
     } catch {
       // ignore non-JSON messages
     }
-  }, []);
+  }, [reconnectCount, doAttach]);
 
-  const sendKey = useCallback(
-    (key: string) => {
+  // Send data to the WebView's WebSocket
+  const sendToTerminal = useCallback(
+    (data: string) => {
       webViewRef.current?.injectJavaScript(
-        `window.sendKey(${JSON.stringify(key)}); true;`,
+        `window.sendKey(${JSON.stringify(data)}); true;`,
       );
     },
     [],
   );
 
-  const terminalHtml = getTerminalHtml(wsUrl ?? '', cols, rows);
+  // Handle text input changes — send each new character
+  // Value is always '' (controlled), so any text in onChangeText is new input
+  const handleTextChange = useCallback(
+    (text: string) => {
+      if (text.length > 0) {
+        sendToTerminal(text);
+      }
+      // Reset synchronously — blurOnSubmit={false} keeps keyboard open
+      setInputText('');
+    },
+    [sendToTerminal],
+  );
+
+  // Handle special keys via keyPress event
+  // Enter is handled by onSubmitEditing to avoid double-send
+  const handleKeyPress = useCallback(
+    (e: NativeSyntheticEvent<TextInputKeyPressEventData>) => {
+      const { key } = e.nativeEvent;
+      if (key === 'Backspace') {
+        sendToTerminal('\x7f');
+      }
+    },
+    [sendToTerminal],
+  );
+
+  // Toggle keyboard on tap — tap to show, tap again to dismiss
+  const focusInput = useCallback(() => {
+    if (keyboardHeight > 0) {
+      inputRef.current?.blur();
+    } else {
+      // Small delay ensures iOS has finished any dismiss animation
+      setTimeout(() => inputRef.current?.focus(), 50);
+    }
+  }, [keyboardHeight]);
+
+  // Clear terminal screen
+  const clearScreen = useCallback(() => {
+    sendToTerminal('\x0c'); // Ctrl-L
+    webViewRef.current?.injectJavaScript('window.scrollToBottom(); true;');
+  }, [sendToTerminal]);
+
+  // Manual reconnect
+  const handleReconnect = useCallback(() => {
+    setReconnectCount(0);
+    setState('connecting');
+    setWsUrl(null);
+    attachedRef.current = false;
+    doAttach();
+  }, [doAttach]);
+
+  // Memoize HTML — only rebuild when wsUrl changes (new connection).
+  // Terminal sizing is handled entirely inside the WebView via ResizeObserver.
+  const terminalHtml = useMemo(
+    () => getTerminalHtml(wsUrl ?? '', width),
+    [wsUrl, width],
+  );
+
+  // Track keyboard height — adjusts container padding so WebView shrinks,
+  // which triggers ResizeObserver inside the WebView to refit the terminal.
+  useEffect(() => {
+    const showSub = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+      (e) => setKeyboardHeight(e.endCoordinates.height),
+    );
+    const hideSub = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+      () => setKeyboardHeight(0),
+    );
+    return () => { showSub.remove(); hideSub.remove(); };
+  }, []);
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: insets.top, paddingBottom: keyboardHeight }]}>
       {/* Header bar */}
       <View style={styles.header}>
         <TouchableOpacity
@@ -123,6 +247,8 @@ export function TerminalScreen({
             <View
               style={[
                 styles.statusDot,
+                state === 'connecting' && styles.statusDotConnecting,
+                state === 'reconnecting' && styles.statusDotConnecting,
                 state === 'attached' && styles.statusDotActive,
                 state === 'error' && styles.statusDotError,
                 state === 'disconnected' && styles.statusDotDisconnected,
@@ -139,12 +265,21 @@ export function TerminalScreen({
             </Text>
           </View>
         </View>
-        <View style={styles.headerRight} />
+        <View style={styles.headerRight}>
+          {state === 'attached' && (
+            <TouchableOpacity onPress={clearScreen} activeOpacity={0.7}>
+              <Text style={styles.headerAction}>Clear</Text>
+            </TouchableOpacity>
+          )}
+        </View>
       </View>
 
-      {/* Terminal */}
-      <View style={styles.terminalContainer}>
-        {state === 'connecting' && !wsUrl && (
+      {/* Terminal area — tap to focus hidden input (brings up keyboard) */}
+      <TouchableOpacity
+        style={styles.terminalContainer}
+        activeOpacity={1}
+        onPress={focusInput}>
+        {state === 'connecting' && (
           <View style={styles.overlay}>
             <ActivityIndicator color={colors.accent} size="large" />
             <Text style={styles.overlayText}>Attaching to session...</Text>
@@ -165,6 +300,15 @@ export function TerminalScreen({
           </View>
         )}
 
+        {state === 'reconnecting' && (
+          <View style={styles.overlay}>
+            <ActivityIndicator color={colors.accent} size="large" />
+            <Text style={styles.overlayText}>
+              Reconnecting... (attempt {reconnectCount + 1}/{MAX_RECONNECT})
+            </Text>
+          </View>
+        )}
+
         {state === 'disconnected' && (
           <View style={styles.overlay}>
             <Text style={styles.overlayIcon}>🔌</Text>
@@ -174,9 +318,15 @@ export function TerminalScreen({
             </Text>
             <TouchableOpacity
               style={styles.retryButton}
+              onPress={handleReconnect}
+              activeOpacity={0.8}>
+              <Text style={styles.retryButtonText}>Reconnect</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.secondaryButton}
               onPress={onBack}
               activeOpacity={0.8}>
-              <Text style={styles.retryButtonText}>Go Back</Text>
+              <Text style={styles.secondaryButtonText}>Go Back</Text>
             </TouchableOpacity>
           </View>
         )}
@@ -191,21 +341,43 @@ export function TerminalScreen({
             originWhitelist={['*']}
             scrollEnabled={false}
             bounces={false}
-            keyboardDisplayRequiresUserAction={false}
-            hideKeyboardAccessoryView
             allowsInlineMediaPlayback
             contentMode="mobile"
           />
         )}
-      </View>
+      </TouchableOpacity>
 
-      {/* Keyboard toolbar for special keys */}
-      {state === 'attached' && <KeyboardToolbar onKey={sendKey} />}
+      {/* Hidden TextInput — captures keyboard input, sends to terminal.
+          Positioned within viewport (opacity 0) so iOS handles blur/refocus correctly. */}
+      {state === 'attached' && (
+        <TextInput
+          ref={inputRef}
+          style={styles.hiddenInput}
+          autoFocus
+          autoCapitalize="none"
+          autoCorrect={false}
+          spellCheck={false}
+          keyboardType="ascii-capable"
+          textContentType="none"
+          onChangeText={handleTextChange}
+          onKeyPress={handleKeyPress}
+          value={inputText}
+          blurOnSubmit={false}
+          returnKeyType="send"
+          onSubmitEditing={() => {
+            sendToTerminal('\r');
+            setInputText('');
+          }}
+        />
+      )}
     </View>
   );
 }
 
-function getTerminalHtml(wsUrl: string, cols: number, rows: number): string {
+function getTerminalHtml(wsUrl: string, screenWidth: number): string {
+  // Estimate initial cols from screen width (fitAddon.fit() will correct immediately)
+  const estCols = Math.max(40, Math.floor((screenWidth - 16) / 8.4));
+
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -217,44 +389,11 @@ function getTerminalHtml(wsUrl: string, cols: number, rows: number): string {
   #terminal { height: 100%; width: 100%; }
   .xterm { padding: 4px; }
   .xterm-viewport::-webkit-scrollbar { display: none; }
-
-  /* xterm.css inline (minimal) */
-  .xterm { position: relative; user-select: none; -ms-user-select: none; -webkit-user-select: none; }
-  .xterm.focus, .xterm:focus { outline: none; }
-  .xterm .xterm-helpers { position: absolute; top: 0; z-index: 5; }
-  .xterm .xterm-helper-textarea {
-    padding: 0; border: 0; margin: 0; position: absolute; opacity: 0;
-    left: -9999em; top: 0; width: 0; height: 0; z-index: -5;
-    white-space: nowrap; overflow: hidden; resize: none;
-  }
-  .xterm .composition-view { background: #000; color: #FFF; display: none; position: absolute; white-space: nowrap; z-index: 1; }
-  .xterm .composition-view.active { display: block; }
-  .xterm .xterm-viewport { background-color: #1A1A1A; overflow-y: scroll; cursor: default; position: absolute; right: 0; left: 0; top: 0; bottom: 0; }
-  .xterm .xterm-screen { position: relative; }
-  .xterm .xterm-screen canvas { position: absolute; left: 0; top: 0; }
-  .xterm .xterm-scroll-area { visibility: hidden; }
-  .xterm-char-measure-element { display: inline-block; visibility: hidden; position: absolute; top: 0; left: -9999em; line-height: normal; }
-  .xterm.enable-mouse-events { cursor: default; }
-  .xterm .xterm-cursor-pointer { cursor: pointer; }
-  .xterm.column-select.focus { cursor: crosshair; }
-  .xterm .xterm-accessibility, .xterm .xterm-message { position: absolute; left: 0; top: 0; bottom: 0; right: 0; z-index: 10; color: transparent; }
-  .xterm .live-region { position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden; }
-  .xterm-dim { opacity: 0.5; }
-  .xterm-underline-1 { text-decoration: underline; }
-  .xterm-underline-2 { text-decoration: double underline; }
-  .xterm-underline-3 { text-decoration: wavy underline; }
-  .xterm-underline-4 { text-decoration: dotted underline; }
-  .xterm-underline-5 { text-decoration: dashed underline; }
-  .xterm-overline { text-decoration: overline; }
-  .xterm-strikethrough { text-decoration: line-through; }
-  .xterm-screen .xterm-decoration-container .xterm-decoration { z-index: 6; position: absolute; }
-  .xterm-decoration-overview-ruler { z-index: 7; position: absolute; top: 0; right: 0; pointer-events: none; }
-  .xterm-decoration-top { z-index: 2; position: relative; }
 </style>
-<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
-<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.min.js"></script>
+<style>${XTERM_CSS}</style>
+<script>${XTERM_JS}</script>
+<script>${FIT_ADDON_JS}</script>
+<script>${WEB_LINKS_ADDON_JS}</script>
 </head>
 <body>
 <div id="terminal"></div>
@@ -262,8 +401,9 @@ function getTerminalHtml(wsUrl: string, cols: number, rows: number): string {
 (function() {
   var wsUrl = ${JSON.stringify(wsUrl)};
   var term = new Terminal({
-    cols: ${cols},
-    rows: ${rows},
+    cols: ${estCols},
+    rows: 24,
+    scrollback: 5000,
     cursorBlink: true,
     cursorStyle: 'block',
     fontSize: 14,
@@ -291,6 +431,7 @@ function getTerminalHtml(wsUrl: string, cols: number, rows: number): string {
       brightCyan: '#26C6DA',
       brightWhite: '#FFFFFF',
     },
+    disableStdin: true,
     allowProposedApi: true,
   });
 
@@ -305,21 +446,70 @@ function getTerminalHtml(wsUrl: string, cols: number, rows: number): string {
     window.ReactNativeWebView.postMessage(JSON.stringify(msg));
   }
 
-  // Send key from RN
+  // Debounced resize — called by ResizeObserver when container changes.
+  // Refits the terminal and tells the PTY the new dimensions.
+  var lastCols = term.cols;
+  var lastRows = term.rows;
+  var resizeTimer = null;
+
+  function doResize() {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function() {
+      try {
+        fitAddon.fit();
+        // Only send resize if dimensions actually changed
+        if (term.cols !== lastCols || term.rows !== lastRows) {
+          lastCols = term.cols;
+          lastRows = term.rows;
+          if (ws && ws.readyState === 1) {
+            ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+          }
+        }
+      } catch(e) {}
+    }, 100);
+  }
+
+  // ResizeObserver — the single source of truth for terminal sizing.
+  // Fires when the WebView container changes (keyboard show/hide, rotation).
+  try {
+    var ro = new ResizeObserver(doResize);
+    ro.observe(document.getElementById('terminal'));
+  } catch(e) {
+    // Fallback for older WebKit
+    window.addEventListener('resize', doResize);
+  }
+
+  window._term = term;
+  window._fitAddon = fitAddon;
+  var ws = null;
+
+  // Send key from React Native keyboard input
+  var encoder = new TextEncoder();
   window.sendKey = function(key) {
     if (ws && ws.readyState === 1) {
-      ws.send(key);
+      ws.send(encoder.encode(key));
     }
+  };
+
+  window.scrollToBottom = function() {
+    term.scrollToBottom();
   };
 
   if (!wsUrl) return;
 
-  var ws = new WebSocket(wsUrl);
+  ws = new WebSocket(wsUrl);
   ws.binaryType = 'arraybuffer';
+  window._ws = ws;
 
   ws.onopen = function() {
+    // Fit to actual container size, then tell daemon the real dimensions
+    try {
+      fitAddon.fit();
+      lastCols = term.cols;
+      lastRows = term.rows;
+      ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+    } catch(e) {}
     notify({ type: 'connected' });
-    term.focus();
   };
 
   ws.onmessage = function(ev) {
@@ -330,24 +520,13 @@ function getTerminalHtml(wsUrl: string, cols: number, rows: number): string {
     }
   };
 
-  ws.onclose = function() {
-    notify({ type: 'disconnected' });
+  ws.onclose = function(ev) {
+    notify({ type: 'disconnected', code: ev.code, reason: ev.reason || '' });
   };
 
-  ws.onerror = function(ev) {
+  ws.onerror = function() {
     notify({ type: 'error', message: 'WebSocket error' });
   };
-
-  term.onData(function(data) {
-    if (ws.readyState === 1) {
-      ws.send(data);
-    }
-  });
-
-  // Resize
-  window.addEventListener('resize', function() {
-    try { fitAddon.fit(); } catch(e) {}
-  });
 })();
 </script>
 </body>
@@ -396,7 +575,10 @@ const styles = StyleSheet.create({
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: colors.warning,
+    backgroundColor: colors.textMuted,
+  },
+  statusDotConnecting: {
+    backgroundColor: colors.accent,
   },
   statusDotActive: {
     backgroundColor: colors.success,
@@ -413,6 +595,12 @@ const styles = StyleSheet.create({
   },
   headerRight: {
     width: 60,
+    alignItems: 'flex-end',
+  },
+  headerAction: {
+    color: colors.accent,
+    fontSize: fontSize.sm,
+    fontWeight: '600',
   },
   terminalContainer: {
     flex: 1,
@@ -420,6 +608,14 @@ const styles = StyleSheet.create({
   webview: {
     flex: 1,
     backgroundColor: colors.terminalBg,
+  },
+  hiddenInput: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: 1,
+    height: 1,
+    opacity: 0.01,
   },
   overlay: {
     ...StyleSheet.absoluteFillObject,
@@ -457,5 +653,15 @@ const styles = StyleSheet.create({
     color: colors.textInverse,
     fontSize: fontSize.md,
     fontWeight: '600',
+  },
+  secondaryButton: {
+    marginTop: spacing.sm,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.xl,
+  },
+  secondaryButtonText: {
+    color: colors.textSecondary,
+    fontSize: fontSize.md,
+    fontWeight: '500',
   },
 });

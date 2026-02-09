@@ -1,6 +1,7 @@
 import { watch } from "chokidar";
-import { readFileSync, statSync, existsSync, mkdirSync, openSync, readSync, closeSync } from "node:fs";
-import { writeFile, mkdir } from "node:fs/promises";
+import { EventEmitter } from "node:events";
+import { readFileSync, existsSync } from "node:fs";
+import { writeFile, mkdir, open, stat as fsStat } from "node:fs/promises";
 import { readdir } from "node:fs/promises";
 import { join, basename, dirname } from "node:path";
 import type { FastifyBaseLogger } from "fastify";
@@ -24,17 +25,30 @@ interface JsonlUserMessage {
   timestamp?: string;
 }
 
-export class SessionDiscovery {
+export class SessionDiscovery extends EventEmitter {
   private sessions = new Map<string, SessionMetadata>();
   private mtimeCache = new Map<string, number>(); // path -> mtimeMs
   private watcher: ReturnType<typeof watch> | null = null;
   private rescanTimer: ReturnType<typeof setInterval> | null = null;
+  private saveCacheTimer: ReturnType<typeof setTimeout> | null = null;
+  private changeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private isScanning = false;
   private log: FastifyBaseLogger;
   private sessionDir: string;
 
   constructor(config: RelayConfig, log: FastifyBaseLogger) {
+    super();
     this.log = log.child({ module: "discovery" });
     this.sessionDir = config.claude.sessionDir;
+  }
+
+  /** Debounced change notification — coalesces rapid changes into a single event. */
+  private notifyChange(): void {
+    if (this.changeDebounceTimer) clearTimeout(this.changeDebounceTimer);
+    this.changeDebounceTimer = setTimeout(() => {
+      this.changeDebounceTimer = null;
+      this.emit("change");
+    }, 2000);
   }
 
   async start(): Promise<void> {
@@ -69,7 +83,8 @@ export class SessionDiscovery {
   stop(): void {
     this.watcher?.close();
     if (this.rescanTimer) clearInterval(this.rescanTimer);
-    this.saveCache();
+    if (this.saveCacheTimer) clearTimeout(this.saveCacheTimer);
+    this.saveCacheImmediate();
   }
 
   getSessions(): SessionMetadata[] {
@@ -97,104 +112,93 @@ export class SessionDiscovery {
     return grouped;
   }
 
-  updateTmuxStatus(
-    sessionId: string,
-    status: "active" | "detached" | "none",
-  ): void {
-    const session = this.sessions.get(sessionId);
-    if (session) {
-      session.tmuxStatus = status;
-    }
-  }
-
   private async fullScan(): Promise<void> {
-    const projectDirs = await this.listProjectDirs();
-    const seen = new Set<string>();
+    if (this.isScanning) return;
+    this.isScanning = true;
 
-    for (const projectDir of projectDirs) {
-      const projectHash = basename(projectDir);
-      const files = await this.listJsonlFiles(projectDir);
+    try {
+      const projectDirs = await this.listProjectDirs();
+      const seen = new Set<string>();
 
-      for (const filePath of files) {
-        const sessionId = basename(filePath, ".jsonl");
-        seen.add(sessionId);
+      for (const projectDir of projectDirs) {
+        const projectHash = basename(projectDir);
+        const files = await this.listJsonlFiles(projectDir);
 
-        try {
-          const stat = statSync(filePath);
-          const cachedMtime = this.mtimeCache.get(filePath);
+        for (const filePath of files) {
+          const sessionId = basename(filePath, ".jsonl");
+          seen.add(sessionId);
 
-          // Skip if mtime unchanged
-          if (cachedMtime && cachedMtime === stat.mtimeMs) continue;
+          try {
+            const fileStat = await fsStat(filePath);
+            const cachedMtime = this.mtimeCache.get(filePath);
 
-          this.mtimeCache.set(filePath, stat.mtimeMs);
-          const metadata = this.parseSessionFile(
-            filePath,
-            sessionId,
-            projectHash,
-            stat.mtimeMs,
-            stat.size,
-          );
-          if (metadata) {
-            // Preserve tmux status from existing entry
-            const existing = this.sessions.get(sessionId);
-            if (existing) {
-              metadata.tmuxStatus = existing.tmuxStatus;
-            }
-            this.sessions.set(sessionId, metadata);
-          }
-        } catch (err) {
-          this.log.warn({ err, filePath }, "Failed to parse session file");
-          // Still list it with minimal info
-          if (!this.sessions.has(sessionId)) {
-            this.sessions.set(sessionId, {
-              id: sessionId,
-              projectPath: "",
+            // Skip if mtime unchanged
+            if (cachedMtime && cachedMtime === fileStat.mtimeMs) continue;
+
+            this.mtimeCache.set(filePath, fileStat.mtimeMs);
+            const metadata = await this.parseSessionFile(
+              filePath,
+              sessionId,
               projectHash,
-              lastMessagePreview: "(unable to read)",
-              lastMessageRole: "unknown",
-              timestamp: new Date(),
-              cliVersion: "",
-              tmuxStatus: "none",
-            });
+              fileStat.mtimeMs,
+              fileStat.size,
+            );
+            if (metadata) {
+              this.sessions.set(sessionId, metadata);
+            }
+          } catch (err) {
+            this.log.warn({ err, filePath }, "Failed to parse session file");
+            // Still list it with minimal info
+            if (!this.sessions.has(sessionId)) {
+              this.sessions.set(sessionId, {
+                id: sessionId,
+                projectPath: "",
+                projectHash,
+                lastMessagePreview: "(unable to read)",
+                lastMessageRole: "unknown",
+                timestamp: new Date(),
+                cliVersion: "",
+              });
+            }
           }
         }
       }
-    }
 
-    // Remove sessions whose files no longer exist
-    for (const id of this.sessions.keys()) {
-      if (!seen.has(id)) {
-        this.sessions.delete(id);
+      // Remove sessions whose files no longer exist
+      for (const id of this.sessions.keys()) {
+        if (!seen.has(id)) {
+          this.sessions.delete(id);
+        }
       }
-    }
 
-    this.saveCache();
+      this.saveCache();
+      this.notifyChange();
+    } finally {
+      this.isScanning = false;
+    }
   }
 
-  private onFileChange(path: string): void {
+  private async onFileChange(path: string): Promise<void> {
     if (!path.endsWith(".jsonl")) return;
 
     const sessionId = basename(path, ".jsonl");
     const projectHash = basename(dirname(path));
 
     try {
-      const stat = statSync(path);
-      this.mtimeCache.set(path, stat.mtimeMs);
+      const fileStat = await fsStat(path);
+      this.mtimeCache.set(path, fileStat.mtimeMs);
 
-      const metadata = this.parseSessionFile(
+      const metadata = await this.parseSessionFile(
         path,
         sessionId,
         projectHash,
-        stat.mtimeMs,
-        stat.size,
+        fileStat.mtimeMs,
+        fileStat.size,
       );
       if (metadata) {
-        const existing = this.sessions.get(sessionId);
-        if (existing) {
-          metadata.tmuxStatus = existing.tmuxStatus;
-        }
         this.sessions.set(sessionId, metadata);
         this.log.debug({ sessionId }, "Session updated");
+        this.notifyChange();
       }
     } catch (err) {
       this.log.warn({ err, path }, "Failed to process file change");
@@ -207,15 +211,16 @@ export class SessionDiscovery {
     this.sessions.delete(sessionId);
     this.mtimeCache.delete(path);
     this.log.debug({ sessionId }, "Session removed");
+    this.notifyChange();
   }
 
-  private parseSessionFile(
+  private async parseSessionFile(
     filePath: string,
     sessionId: string,
     projectHash: string,
     mtimeMs: number,
     fileSize: number,
-  ): SessionMetadata | null {
+  ): Promise<SessionMetadata | null> {
     if (fileSize === 0) return null;
 
     let projectPath = "";
@@ -224,7 +229,7 @@ export class SessionDiscovery {
     let lastMessageRole: "user" | "assistant" | "unknown" = "unknown";
 
     // Parse head lines to find first user message with cwd
-    const headLines = this.readHeadLines(filePath);
+    const headLines = await this.readHeadLines(filePath);
     for (const line of headLines) {
       try {
         const parsed = JSON.parse(line) as JsonlUserMessage;
@@ -238,7 +243,7 @@ export class SessionDiscovery {
     }
 
     // Parse tail for last message
-    const tailLines = this.readTailLines(filePath, fileSize);
+    const tailLines = await this.readTailLines(filePath, fileSize);
     for (let i = tailLines.length - 1; i >= 0; i--) {
       try {
         const parsed = JSON.parse(tailLines[i]) as JsonlUserMessage;
@@ -269,7 +274,6 @@ export class SessionDiscovery {
       lastMessageRole,
       timestamp: new Date(mtimeMs),
       cliVersion,
-      tmuxStatus: "none",
     };
   }
 
@@ -290,30 +294,28 @@ export class SessionDiscovery {
     return text.length > 200 ? text.slice(0, 200) + "..." : text;
   }
 
-  private readHeadLines(filePath: string, maxBytes = 131072): string[] {
-    const fd = openSync(filePath, "r");
+  private async readHeadLines(filePath: string, maxBytes = 4096): Promise<string[]> {
+    const fh = await open(filePath, "r");
     try {
-      const stat = statSync(filePath);
-      const readSize = Math.min(maxBytes, stat.size);
-      const buf = Buffer.alloc(readSize);
-      const bytesRead = readSync(fd, buf, 0, readSize, 0);
+      const buf = Buffer.alloc(maxBytes);
+      const { bytesRead } = await fh.read(buf, 0, maxBytes, 0);
       if (bytesRead === 0) return [];
 
       const text = buf.subarray(0, bytesRead).toString("utf-8");
       return text.split("\n").filter((l) => l.trim().length > 0).slice(0, 20);
     } finally {
-      closeSync(fd);
+      await fh.close();
     }
   }
 
-  private readTailLines(filePath: string, fileSize: number): string[] {
+  private async readTailLines(filePath: string, fileSize: number): Promise<string[]> {
     const readSize = Math.min(TAIL_BYTES, fileSize);
     const offset = Math.max(0, fileSize - readSize);
 
-    const fd = openSync(filePath, "r");
+    const fh = await open(filePath, "r");
     try {
       const buf = Buffer.alloc(readSize);
-      const bytesRead = readSync(fd, buf, 0, readSize, offset);
+      const { bytesRead } = await fh.read(buf, 0, readSize, offset);
       if (bytesRead === 0) return [];
 
       const text = buf.subarray(0, bytesRead).toString("utf-8");
@@ -326,7 +328,7 @@ export class SessionDiscovery {
 
       return lines;
     } finally {
-      closeSync(fd);
+      await fh.close();
     }
   }
 
@@ -372,7 +374,6 @@ export class SessionDiscovery {
             | "unknown",
           timestamp: new Date(entry.timestamp),
           cliVersion: entry.cliVersion,
-          tmuxStatus: "none",
         });
         // We don't cache mtime — full scan will re-check
       }
@@ -386,10 +387,21 @@ export class SessionDiscovery {
     }
   }
 
+  /** Debounced cache save — coalesces rapid calls into a single write after 5s. */
   private saveCache(): void {
-    // Fire-and-forget async write to avoid blocking event loop
+    if (this.saveCacheTimer) clearTimeout(this.saveCacheTimer);
+    this.saveCacheTimer = setTimeout(() => {
+      this.saveCacheTimer = null;
+      this.saveCacheAsync().catch((err) => {
+        this.log.warn({ err }, "Failed to save session cache");
+      });
+    }, 5_000);
+  }
+
+  /** Immediate cache save (used on shutdown). */
+  private saveCacheImmediate(): void {
     this.saveCacheAsync().catch((err) => {
-      this.log.warn({ err }, "Failed to save session cache");
+      this.log.warn({ err }, "Failed to save session cache on shutdown");
     });
   }
 

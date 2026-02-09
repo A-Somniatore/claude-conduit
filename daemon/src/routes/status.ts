@@ -24,6 +24,7 @@ export function registerStatusRoutes(
 
     return {
       version: "0.1.0",
+      apiVersion: 1,
       claude: claudeVersion,
       activeSessions: tmuxSessions.length,
       tmuxSessions: tmuxSessions.map((s) => ({

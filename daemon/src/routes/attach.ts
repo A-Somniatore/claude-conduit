@@ -1,27 +1,38 @@
 import type { FastifyInstance } from "fastify";
-import type { SessionDiscovery } from "../sessions/discovery.js";
+import type { SessionRegistry } from "../sessions/registry.js";
 import type { TmuxManager } from "../tmux/manager.js";
 import { SessionConflictError } from "../tmux/manager.js";
-import type { TerminalBridge } from "../terminal/bridge.js";
 import type { AttachTokens } from "../auth.js";
 import { isValidSessionId } from "../auth.js";
 
 // Rate limit: track last attach time per session, prune periodically
 const lastAttachTime = new Map<string, number>();
-setInterval(() => {
-  const cutoff = Date.now() - 60_000;
-  for (const [id, time] of lastAttachTime) {
-    if (time < cutoff) lastAttachTime.delete(id);
-  }
-}, 60_000);
+let rateLimitCleanup: ReturnType<typeof setInterval> | null = null;
 
 export function registerAttachRoutes(
   app: FastifyInstance,
-  discovery: SessionDiscovery,
+  registry: SessionRegistry,
   tmuxManager: TmuxManager,
-  bridge: TerminalBridge,
   attachTokens: AttachTokens,
 ): void {
+  // Start rate limit cleanup
+  if (!rateLimitCleanup) {
+    rateLimitCleanup = setInterval(() => {
+      const cutoff = Date.now() - 60_000;
+      for (const [id, time] of lastAttachTime) {
+        if (time < cutoff) lastAttachTime.delete(id);
+      }
+    }, 60_000);
+  }
+
+  // Clean up on shutdown
+  app.addHook("onClose", () => {
+    if (rateLimitCleanup) {
+      clearInterval(rateLimitCleanup);
+      rateLimitCleanup = null;
+    }
+  });
+
   // POST /api/sessions/:id/attach — create/attach tmux session
   app.post<{ Params: { id: string } }>(
     "/api/sessions/:id/attach",
@@ -38,9 +49,14 @@ export function registerAttachRoutes(
         return;
       }
 
-      // Verify session exists
-      const session = discovery.getSession(sessionId);
-      if (!session) {
+      // Verify session exists (in discovery or as a live tmux session)
+      const hasDiscovery = registry.hasSession(sessionId);
+      const tmuxName = tmuxManager.tmuxName(sessionId);
+      const hasTmux = !hasDiscovery
+        ? (await tmuxManager.listSessions()).some((s) => s.name === tmuxName)
+        : false;
+
+      if (!hasDiscovery && !hasTmux) {
         reply.code(404).send({
           error: "NOT_FOUND",
           message: "Session not found",
@@ -63,11 +79,8 @@ export function registerAttachRoutes(
       lastAttachTime.set(sessionId, now);
 
       try {
-        const result = await tmuxManager.attach(sessionId);
-        discovery.updateTmuxStatus(
-          sessionId,
-          result.existed ? "detached" : "none",
-        );
+        const projectPath = registry.getSessionProjectPath(sessionId);
+        const result = await tmuxManager.attach(sessionId, projectPath);
 
         // Generate single-use attach token for the WS connection
         const token = attachTokens.generate(sessionId);

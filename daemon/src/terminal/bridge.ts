@@ -1,6 +1,10 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { WebSocket } from "ws";
 import type { FastifyBaseLogger } from "fastify";
 import type { RelayConfig } from "../config.js";
+
+const execAsync = promisify(execFile);
 
 // node-pty uses CommonJS — need dynamic import
 let ptyModule: typeof import("node-pty") | null = null;
@@ -38,11 +42,13 @@ export class TerminalBridge {
     this.reapTimer = setInterval(() => this.reapOrphans(), 60_000);
   }
 
-  stop(): void {
+  async stop(): Promise<void> {
     if (this.reapTimer) clearInterval(this.reapTimer);
+    const cleanups: Promise<void>[] = [];
     for (const [id, terminal] of this.terminals) {
-      this.cleanupTerminal(id, terminal);
+      cleanups.push(this.cleanupTerminal(id, terminal));
     }
+    await Promise.all(cleanups);
   }
 
   /** Check if a session has an active terminal — single source of truth. */
@@ -61,12 +67,31 @@ export class TerminalBridge {
     cols: number,
     rows: number,
   ): Promise<void> {
-    if (this.terminals.has(sessionId)) {
-      ws.close(4409, "Session already has an active terminal connection");
-      return;
+    const existing = this.terminals.get(sessionId);
+    if (existing) {
+      // If the existing WS is dead/closing, proactively clean it up
+      // instead of waiting for the 60s orphan reaper.
+      if (
+        existing.ws.readyState === existing.ws.CLOSED ||
+        existing.ws.readyState === existing.ws.CLOSING
+      ) {
+        this.log.info({ sessionId }, "Cleaning up stale terminal connection for reconnect");
+        this.cleanupTerminal(sessionId, existing);
+      } else {
+        ws.close(4409, "Session already has an active terminal connection");
+        return;
+      }
     }
 
     const pty = await loadPty();
+
+    // Disable tmux status bar — it steals a row and causes rendering issues
+    // with Claude Code's ANSI cursor repositioning (spinners, progress bars).
+    try {
+      await execAsync("tmux", ["set-option", "-t", tmuxSession, "status", "off"]);
+    } catch {
+      // Non-fatal — session might not exist yet or tmux might not be running
+    }
 
     const ptyProcess = pty.spawn("tmux", ["attach-session", "-t", tmuxSession], {
       name: "xterm-256color",
@@ -90,6 +115,14 @@ export class TerminalBridge {
       { sessionId, tmuxSession, pid: ptyProcess.pid, cols, rows },
       "Terminal attached",
     );
+
+    // Suppress initial tmux pane redraw — discard first 500ms of output,
+    // then force a resize to trigger a clean redraw at the phone's dimensions.
+    let initialFlushDone = false;
+    const initialFlushTimer = setTimeout(() => {
+      initialFlushDone = true;
+      ptyProcess.resize(cols, rows);
+    }, 500);
 
     // Output batching for backpressure control
     let outputBuffer: Buffer[] = [];
@@ -122,13 +155,15 @@ export class TerminalBridge {
 
     // PTY → WS (binary)
     ptyProcess.onData((data: string) => {
+      // Discard initial tmux pane dump (first 500ms)
+      if (!initialFlushDone) return;
+
       const buf = Buffer.from(data, "utf-8");
 
-      // Cap output buffer to prevent unbounded growth
-      if (outputBufferSize + buf.length > OUTPUT_BUFFER_MAX) {
-        // Drop oldest data
-        outputBuffer = [];
-        outputBufferSize = 0;
+      // FIFO eviction — drop oldest chunks until there's room
+      while (outputBufferSize + buf.length > OUTPUT_BUFFER_MAX && outputBuffer.length > 0) {
+        const dropped = outputBuffer.shift();
+        if (dropped) outputBufferSize -= dropped.length;
       }
 
       outputBuffer.push(buf);
@@ -142,6 +177,7 @@ export class TerminalBridge {
     // PTY exit — cleanup including SIGKILL escalation
     ptyProcess.onExit(({ exitCode, signal }) => {
       this.log.info({ sessionId, exitCode, signal }, "PTY process exited");
+      clearTimeout(initialFlushTimer);
       clearBatchTimer();
       flushOutput();
       this.cleanupTerminal(sessionId, terminal);
@@ -153,26 +189,35 @@ export class TerminalBridge {
 
     // WS → PTY
     ws.on("message", (data: Buffer | string, isBinary: boolean) => {
-      if (typeof data === "string" || !isBinary) {
-        // Text frame = control message
-        try {
-          const msg = JSON.parse(
-            typeof data === "string" ? data : data.toString("utf-8"),
-          ) as { type: string; cols?: number; rows?: number };
-
-          if (msg.type === "resize" && msg.cols && msg.rows) {
-            ptyProcess.resize(msg.cols, msg.rows);
-            this.log.debug(
-              { sessionId, cols: msg.cols, rows: msg.rows },
-              "Terminal resized",
-            );
-          }
-        } catch {
-          // Malformed control message — ignore
-        }
-      } else {
+      if (isBinary) {
         // Binary frame = terminal input
         ptyProcess.write(data.toString("utf-8"));
+        return;
+      }
+
+      // Text frame = control message (JSON only). Non-JSON text is dropped.
+      const text = typeof data === "string" ? data : data.toString("utf-8");
+      try {
+        const msg = JSON.parse(text) as {
+          type: string;
+          cols?: number;
+          rows?: number;
+        };
+
+        if (msg.type === "resize" && msg.cols && msg.rows) {
+          ptyProcess.resize(msg.cols, msg.rows);
+          this.log.debug(
+            { sessionId, cols: msg.cols, rows: msg.rows },
+            "Terminal resized",
+          );
+          return;
+        }
+
+        // Valid JSON but unrecognized type — drop it
+        this.log.warn({ sessionId, type: msg.type }, "Unrecognized control message type, dropping");
+      } catch {
+        // Not valid JSON — drop the frame
+        this.log.warn({ sessionId }, "Received non-JSON text frame, dropping");
       }
     });
 
@@ -216,10 +261,10 @@ export class TerminalBridge {
     });
   }
 
-  private cleanupTerminal(sessionId: string, terminal: ActiveTerminal): void {
+  private cleanupTerminal(sessionId: string, terminal: ActiveTerminal): Promise<void> {
     // Idempotent — only clean up once
-    if (terminal.cleanedUp) return;
-    if (this.terminals.get(sessionId) !== terminal) return;
+    if (terminal.cleanedUp) return Promise.resolve();
+    if (this.terminals.get(sessionId) !== terminal) return Promise.resolve();
 
     terminal.cleanedUp = true;
     this.terminals.delete(sessionId);
@@ -230,18 +275,31 @@ export class TerminalBridge {
       this.log.debug({ sessionId, pid }, "PTY process killed (SIGTERM)");
     } catch {
       // Already dead
+      return Promise.resolve();
     }
 
-    // Escalate to SIGKILL after 5s if still alive
-    setTimeout(() => {
+    // Resolve when PTY exits or after SIGKILL escalation timeout
+    return new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => {
+        try {
+          process.kill(pid, 0); // Check if alive
+          process.kill(pid, "SIGKILL");
+          this.log.warn({ sessionId, pid }, "Force-killed PTY process (SIGKILL)");
+        } catch {
+          // Already dead — good
+        }
+        resolve();
+      }, 5000);
+
+      // If PTY exits before the timeout, resolve early
       try {
-        process.kill(pid, 0); // Check if alive
-        process.kill(pid, "SIGKILL");
-        this.log.warn({ sessionId, pid }, "Force-killed PTY process (SIGKILL)");
+        process.kill(pid, 0); // Still alive — wait for timeout
       } catch {
-        // Already dead — good
+        // Already dead — resolve immediately
+        clearTimeout(timeout);
+        resolve();
       }
-    }, 5000);
+    });
   }
 
   private reapOrphans(): void {

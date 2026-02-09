@@ -1,20 +1,34 @@
-import React, { useEffect, useState } from 'react';
-import { View, StyleSheet, useWindowDimensions } from 'react-native';
+import React, { useEffect, useState, Suspense, lazy } from 'react';
+import { View, Text, StyleSheet, useWindowDimensions, ActivityIndicator } from 'react-native';
 import { useConnectionStore } from '../stores/connection';
-import { VpnCheckScreen } from '../screens/VpnCheckScreen';
+import { ConnectionErrorScreen } from '../screens/ConnectionErrorScreen';
 import { SetupScreen } from '../screens/SetupScreen';
 import { SessionListScreen } from '../screens/SessionListScreen';
-import { TerminalScreen } from '../screens/TerminalScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
-import { colors } from '../theme';
+import { NewSessionScreen } from '../screens/NewSessionScreen';
+import { colors, fontSize, spacing } from '../theme';
 import type { Session } from '../types/session';
 
+// Lazy-load TerminalScreen — defers 288KB xterm bundle parse until first terminal open
+const TerminalScreen = lazy(() =>
+  import('../screens/TerminalScreen').then(m => ({ default: m.TerminalScreen })),
+);
+
+function TerminalFallback() {
+  return (
+    <View style={styles.loading}>
+      <ActivityIndicator color={colors.accent} size="large" />
+    </View>
+  );
+}
+
 type Screen =
-  | { name: 'vpnCheck' }
+  | { name: 'connectionError' }
   | { name: 'setup' }
   | { name: 'sessions' }
-  | { name: 'terminal'; session: Session }
-  | { name: 'settings' };
+  | { name: 'terminal'; session: Session; attachToken?: string }
+  | { name: 'settings' }
+  | { name: 'newSession' };
 
 const IPAD_MIN_WIDTH = 700;
 
@@ -39,9 +53,9 @@ export function AppNavigator() {
     return <SetupScreen />;
   }
 
-  // Configured but daemon unreachable -> VPN check
+  // Configured but daemon unreachable -> connection error
   if (!isReachable) {
-    return <VpnCheckScreen />;
+    return <ConnectionErrorScreen />;
   }
 
   // iPad split view
@@ -51,24 +65,46 @@ export function AppNavigator() {
         <View style={styles.sidebar}>
           {screen.name === 'settings' ? (
             <SettingsScreen onBack={() => setScreen({ name: 'sessions' })} />
+          ) : screen.name === 'newSession' ? (
+            <NewSessionScreen
+              onBack={() => setScreen({ name: 'sessions' })}
+              onCreated={(sessionId, attachToken, projectPath, projectName) => {
+                const session: Session = {
+                  id: sessionId,
+                  projectPath,
+                  projectName,
+                  lastMessagePreview: 'New session',
+                  lastMessageRole: 'unknown',
+                  timestamp: new Date().toISOString(),
+                  cliVersion: '',
+                  tmuxStatus: 'active',
+                };
+                setScreen({ name: 'terminal', session, attachToken });
+              }}
+            />
           ) : (
             <SessionListScreen
               onSelectSession={session =>
                 setScreen({ name: 'terminal', session })
               }
               onOpenSettings={() => setScreen({ name: 'settings' })}
+              onNewSession={() => setScreen({ name: 'newSession' })}
             />
           )}
         </View>
         <View style={styles.main}>
           {screen.name === 'terminal' ? (
-            <TerminalScreen
-              session={screen.session}
-              onBack={() => setScreen({ name: 'sessions' })}
-            />
+            <Suspense fallback={<TerminalFallback />}>
+              <TerminalScreen
+                session={screen.session}
+                attachToken={screen.attachToken}
+                onBack={() => setScreen({ name: 'sessions' })}
+              />
+            </Suspense>
           ) : (
             <View style={styles.placeholder}>
-              {/* Empty state for right panel */}
+              <Text style={styles.placeholderIcon}>▸</Text>
+              <Text style={styles.placeholderText}>Select a session to continue</Text>
             </View>
           )}
         </View>
@@ -83,12 +119,36 @@ export function AppNavigator() {
     );
   }
 
+  if (screen.name === 'newSession') {
+    return (
+      <NewSessionScreen
+        onBack={() => setScreen({ name: 'sessions' })}
+        onCreated={(sessionId, attachToken, projectPath, projectName) => {
+          const session: Session = {
+            id: sessionId,
+            projectPath,
+            projectName,
+            lastMessagePreview: 'New session',
+            lastMessageRole: 'unknown',
+            timestamp: new Date().toISOString(),
+            cliVersion: '',
+            tmuxStatus: 'active',
+          };
+          setScreen({ name: 'terminal', session, attachToken });
+        }}
+      />
+    );
+  }
+
   if (screen.name === 'terminal') {
     return (
-      <TerminalScreen
-        session={screen.session}
-        onBack={() => setScreen({ name: 'sessions' })}
-      />
+      <Suspense fallback={<TerminalFallback />}>
+        <TerminalScreen
+          session={screen.session}
+          attachToken={screen.attachToken}
+          onBack={() => setScreen({ name: 'sessions' })}
+        />
+      </Suspense>
     );
   }
 
@@ -96,6 +156,7 @@ export function AppNavigator() {
     <SessionListScreen
       onSelectSession={session => setScreen({ name: 'terminal', session })}
       onOpenSettings={() => setScreen({ name: 'settings' })}
+      onNewSession={() => setScreen({ name: 'newSession' })}
     />
   );
 }
@@ -120,5 +181,17 @@ const styles = StyleSheet.create({
   placeholder: {
     flex: 1,
     backgroundColor: colors.bg,
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: spacing.md,
+  },
+  placeholderIcon: {
+    fontSize: 48,
+    color: colors.textMuted,
+  },
+  placeholderText: {
+    fontSize: fontSize.md,
+    color: colors.textMuted,
+    fontWeight: '500',
   },
 });

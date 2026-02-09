@@ -24,13 +24,14 @@ export class SessionLock {
 
     // Register our completion promise as the tail of the chain
     // Use .catch(() => {}) so a rejected promise doesn't block the next waiter
-    this.chains.set(sessionId, next.catch(() => {}));
+    const wrapped = next.catch(() => {});
+    this.chains.set(sessionId, wrapped);
 
     try {
       return await work;
     } finally {
       // Clean up if we're the last in the chain
-      if (this.chains.get(sessionId) === next) {
+      if (this.chains.get(sessionId) === wrapped) {
         this.chains.delete(sessionId);
       }
     }

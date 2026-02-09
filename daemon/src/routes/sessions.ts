@@ -1,48 +1,16 @@
 import type { FastifyInstance } from "fastify";
-import type { SessionDiscovery } from "../sessions/discovery.js";
+import type { SessionRegistry } from "../sessions/registry.js";
 import type { TmuxManager } from "../tmux/manager.js";
-import type { TerminalBridge } from "../terminal/bridge.js";
 import { isValidSessionId } from "../auth.js";
-import { basename } from "node:path";
 
 export function registerSessionRoutes(
   app: FastifyInstance,
-  discovery: SessionDiscovery,
+  registry: SessionRegistry,
   tmuxManager: TmuxManager,
-  bridge: TerminalBridge,
 ): void {
   // GET /api/sessions — list all sessions
   app.get("/api/sessions", async () => {
-    const sessions = discovery.getSessions();
-
-    // Update tmux status for each session
-    const tmuxSessions = await tmuxManager.listClaudeSessions();
-    const tmuxMap = new Map(
-      tmuxSessions.map((s) => [s.sessionId, s.tmux]),
-    );
-
-    return sessions.map((s) => {
-      const tmux = tmuxMap.get(s.id);
-      const tmuxStatus = tmux
-        ? tmux.attached
-          ? "active"
-          : "detached"
-        : "none";
-
-      // Update discovery's cached status
-      discovery.updateTmuxStatus(s.id, tmuxStatus);
-
-      return {
-        id: s.id,
-        projectPath: s.projectPath,
-        projectName: s.projectPath ? basename(s.projectPath) : s.projectHash,
-        lastMessagePreview: s.lastMessagePreview,
-        lastMessageRole: s.lastMessageRole,
-        timestamp: s.timestamp.toISOString(),
-        cliVersion: s.cliVersion,
-        tmuxStatus,
-      };
-    });
+    return registry.listSessions();
   });
 
   // GET /api/sessions/:id — session detail
@@ -58,7 +26,7 @@ export function registerSessionRoutes(
         return;
       }
 
-      const session = discovery.getSession(request.params.id);
+      const session = await registry.getSession(request.params.id);
       if (!session) {
         reply.code(404).send({
           error: "NOT_FOUND",
@@ -68,55 +36,48 @@ export function registerSessionRoutes(
         return;
       }
 
-      const tmuxSessions = await tmuxManager.listClaudeSessions();
-      const tmux = tmuxSessions.find((s) => s.sessionId === session.id);
-      const tmuxStatus = tmux
-        ? tmux.tmux.attached
-          ? "active"
-          : "detached"
-        : "none";
-      discovery.updateTmuxStatus(session.id, tmuxStatus);
-
-      return {
-        id: session.id,
-        projectPath: session.projectPath,
-        projectName: session.projectPath
-          ? basename(session.projectPath)
-          : session.projectHash,
-        projectHash: session.projectHash,
-        lastMessagePreview: session.lastMessagePreview,
-        lastMessageRole: session.lastMessageRole,
-        timestamp: session.timestamp.toISOString(),
-        cliVersion: session.cliVersion,
-        tmuxStatus,
-        hasActiveConnection: bridge.hasActiveTerminal(session.id),
-      };
+      return session;
     },
   );
 
+  // POST /api/sessions/:id/kill — kill a tmux session
+  app.post<{ Params: { id: string } }>(
+    "/api/sessions/:id/kill",
+    async (request, reply) => {
+      const sessionId = request.params.id;
+
+      if (!isValidSessionId(sessionId)) {
+        reply.code(400).send({
+          error: "INVALID_SESSION_ID",
+          message: "Session ID must be a valid UUID",
+          action: "Check the session ID format",
+        });
+        return;
+      }
+
+      const tmuxName = tmuxManager.tmuxName(sessionId);
+      const sessions = await tmuxManager.listSessions();
+      const exists = sessions.some((s) => s.name === tmuxName);
+
+      if (!exists) {
+        return { success: true, existed: false };
+      }
+
+      await tmuxManager.killSession(tmuxName);
+      registry.invalidateTmuxCache();
+      return { success: true, existed: true };
+    },
+  );
+
+  // POST /api/sessions/kill-all — kill all Claude tmux sessions
+  app.post("/api/sessions/kill-all", async () => {
+    const killed = await tmuxManager.killAllClaudeSessions();
+    registry.invalidateTmuxCache();
+    return { success: true, killed };
+  });
+
   // GET /api/projects — sessions grouped by project
   app.get("/api/projects", async () => {
-    const grouped = discovery.getSessionsByProject();
-    const result: Array<{
-      projectPath: string;
-      projectName: string;
-      sessionCount: number;
-      latestTimestamp: string;
-    }> = [];
-
-    for (const [path, sessions] of grouped) {
-      result.push({
-        projectPath: path,
-        projectName: basename(path) || path,
-        sessionCount: sessions.length,
-        latestTimestamp: sessions[0].timestamp.toISOString(),
-      });
-    }
-
-    return result.sort(
-      (a, b) =>
-        new Date(b.latestTimestamp).getTime() -
-        new Date(a.latestTimestamp).getTime(),
-    );
+    return registry.getSessionsByProject();
   });
 }

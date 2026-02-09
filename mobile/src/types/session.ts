@@ -1,3 +1,5 @@
+export type ClaudeState = 'waiting' | 'thinking' | 'idle' | 'unknown';
+
 export interface Session {
   id: string;
   projectPath: string;
@@ -7,6 +9,8 @@ export interface Session {
   timestamp: string;
   cliVersion: string;
   tmuxStatus: 'active' | 'detached' | 'none';
+  hasActiveConnection?: boolean;
+  claudeState?: ClaudeState;
 }
 
 export interface Project {
@@ -25,6 +29,7 @@ export interface AttachResult {
 
 export interface DaemonStatus {
   version: string;
+  apiVersion?: number;
   claude: string;
   activeSessions: number;
   tmuxSessions: Array<{
@@ -33,6 +38,20 @@ export interface DaemonStatus {
     created: string;
   }>;
   uptime: number;
+}
+
+export interface DirectoryEntry {
+  name: string;
+  path: string;
+  group: 'root' | 'projects' | 'startups';
+}
+
+export interface NewSessionResult {
+  sessionId: string;
+  tmuxSession: string;
+  projectPath: string;
+  projectName: string;
+  attachToken: string;
 }
 
 export interface ApiError {

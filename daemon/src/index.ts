@@ -5,11 +5,14 @@ import type { WebSocket } from "ws";
 import { loadConfig } from "./config.js";
 import { createAuthHook, AttachTokens, verifyPsk, isValidSessionId } from "./auth.js";
 import { SessionDiscovery } from "./sessions/discovery.js";
+import { SessionRegistry } from "./sessions/registry.js";
 import { TmuxManager } from "./tmux/manager.js";
 import { TerminalBridge } from "./terminal/bridge.js";
 import { registerStatusRoutes } from "./routes/status.js";
 import { registerSessionRoutes } from "./routes/sessions.js";
 import { registerAttachRoutes } from "./routes/attach.js";
+import { registerNewSessionRoutes } from "./routes/newSession.js";
+import { registerStreamRoutes } from "./routes/stream.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -31,11 +34,24 @@ async function main(): Promise<void> {
     },
   });
 
+  // Allow empty body with Content-Type: application/json (iOS fetch quirk)
+  app.addContentTypeParser("application/json", { parseAs: "string" }, (_req, body, done) => {
+    if (!body || (typeof body === "string" && body.trim() === "")) {
+      done(null, undefined);
+      return;
+    }
+    try {
+      done(null, JSON.parse(body as string));
+    } catch (err) {
+      done(err as Error, undefined);
+    }
+  });
+
   const log = app.log;
 
   // CORS for mobile WebView
   await app.register(fastifyCors, {
-    origin: true, // Allow all origins (single-user, VPN-only)
+    origin: true, // Allow all origins (single-user daemon)
     methods: ["GET", "POST"],
   });
 
@@ -52,11 +68,15 @@ async function main(): Promise<void> {
   // TmuxManager uses bridge as single source of truth for active connections
   const tmuxManager = new TmuxManager(config, log, (id) => bridge.hasActiveTerminal(id));
   const attachTokens = new AttachTokens();
+  // Registry composes discovery + tmux + bridge state into a unified view
+  const registry = new SessionRegistry(discovery, tmuxManager, bridge, log);
 
   // Register REST routes
   registerStatusRoutes(app, config, tmuxManager);
-  registerSessionRoutes(app, discovery, tmuxManager, bridge);
-  registerAttachRoutes(app, discovery, tmuxManager, bridge, attachTokens);
+  registerSessionRoutes(app, registry, tmuxManager);
+  registerAttachRoutes(app, registry, tmuxManager, attachTokens);
+  registerNewSessionRoutes(app, tmuxManager, attachTokens, config);
+  registerStreamRoutes(app, registry, discovery);
 
   // WebSocket terminal endpoint
   app.get<{
@@ -90,7 +110,7 @@ async function main(): Promise<void> {
         }
       }
 
-      if (!authorized && authHeader) {
+      if (!authorized && authHeader && config.debug) {
         authorized = verifyPsk(authHeader, config.auth.psk);
       }
 
@@ -116,13 +136,10 @@ async function main(): Promise<void> {
   // Startup
   await discovery.start();
   bridge.start();
+  tmuxManager.startCacheRefresh();
 
   // Reconcile existing tmux sessions + clean orphaned PTYs
   await tmuxManager.reconcile();
-  const claudeSessions = await tmuxManager.listClaudeSessions();
-  for (const s of claudeSessions) {
-    discovery.updateTmuxStatus(s.sessionId, s.tmux.attached ? "active" : "detached");
-  }
 
   // Start listening
   await app.listen({ port: config.port, host: config.host });
@@ -138,12 +155,12 @@ async function main(): Promise<void> {
   // Graceful shutdown
   const shutdown = async (signal: string): Promise<void> => {
     log.info({ signal }, "Shutting down...");
-    bridge.stop();
+    await bridge.stop();
     discovery.stop();
     attachTokens.stop();
+    tmuxManager.stopCacheRefresh();
     await app.close();
-    // Give SIGKILL escalation timers a chance to run
-    setTimeout(() => process.exit(0), 6000);
+    process.exit(0);
   };
 
   process.on("SIGINT", () => shutdown("SIGINT"));

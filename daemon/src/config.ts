@@ -7,6 +7,7 @@ import { randomBytes } from "node:crypto";
 export interface RelayConfig {
   port: number;
   host: string;
+  debug: boolean;
   auth: {
     psk: string;
   };
@@ -25,6 +26,7 @@ export interface RelayConfig {
     wsHeartbeat: number;
     wsMaxMissedPongs: number;
   };
+  projectDirs: string[];
 }
 
 const CONFIG_DIR = join(homedir(), ".config", "claude-relay");
@@ -34,6 +36,7 @@ function defaults(): RelayConfig {
   return {
     port: 7860,
     host: "0.0.0.0",
+    debug: false,
     auth: {
       psk: "",
     },
@@ -52,6 +55,10 @@ function defaults(): RelayConfig {
       wsHeartbeat: 30,
       wsMaxMissedPongs: 3,
     },
+    projectDirs: [
+      join(homedir(), "projects"),
+      join(homedir(), "projects", "Startups"),
+    ],
   };
 }
 
@@ -103,6 +110,7 @@ function mergeConfig(
 
   if (typeof overrides.port === "number") result.port = overrides.port;
   if (typeof overrides.host === "string") result.host = overrides.host;
+  if (typeof overrides.debug === "boolean") result.debug = overrides.debug;
 
   const auth = overrides.auth as Record<string, unknown> | undefined;
   if (auth?.psk && typeof auth.psk === "string") {
@@ -135,6 +143,18 @@ function mergeConfig(
       result.rateLimit.wsHeartbeat = rateLimit.wsHeartbeat;
     if (typeof rateLimit.wsMaxMissedPongs === "number")
       result.rateLimit.wsMaxMissedPongs = rateLimit.wsMaxMissedPongs;
+  }
+
+  if (Array.isArray(overrides.projectDirs)) {
+    const dirs = (overrides.projectDirs as unknown[]).filter(
+      (d): d is string => typeof d === "string",
+    );
+    if (dirs.length > 0) {
+      // Resolve ~ in paths
+      result.projectDirs = dirs.map((d) =>
+        d.startsWith("~/") ? join(homedir(), d.slice(2)) : d,
+      );
+    }
   }
 
   return result;
