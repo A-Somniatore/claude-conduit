@@ -1,6 +1,6 @@
 ---
 name: Feature request
-about: Suggest an idea for Claude Relay
+about: Suggest an idea for Claude Conduit
 title: ''
 labels: enhancement
 assignees: ''

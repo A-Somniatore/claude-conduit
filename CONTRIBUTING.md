@@ -1,6 +1,6 @@
-# Contributing to Claude Relay
+# Contributing to Claude Conduit
 
-Thanks for your interest in contributing! Claude Relay is a small project and we welcome PRs of all sizes.
+Thanks for your interest in contributing! Claude Conduit is a small project and we welcome PRs of all sizes.
 
 ## Development Setup
 
@@ -66,8 +66,8 @@ See [CLAUDE.md](CLAUDE.md) for detailed architecture notes.
 
 ## Reporting Issues
 
-- Use the [bug report template](https://github.com/A-Somniatore/claude-relay/issues/new?template=bug_report.md) for bugs
-- Use the [feature request template](https://github.com/A-Somniatore/claude-relay/issues/new?template=feature_request.md) for ideas
+- Use the [bug report template](https://github.com/A-Somniatore/claude-conduit/issues/new?template=bug_report.md) for bugs
+- Use the [feature request template](https://github.com/A-Somniatore/claude-conduit/issues/new?template=feature_request.md) for ideas
 - Include your Node.js version, macOS version, and relevant logs
 
 ## License

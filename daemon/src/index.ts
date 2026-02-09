@@ -19,7 +19,7 @@ async function main(): Promise<void> {
 
   if (!config.auth.psk) {
     console.error(
-      "ERROR: No PSK configured. Edit ~/.config/claude-relay/config.yaml and set auth.psk",
+      "ERROR: No PSK configured. Edit ~/.config/claude-conduit/config.yaml and set auth.psk",
     );
     process.exit(1);
   }
@@ -149,7 +149,7 @@ async function main(): Promise<void> {
       host: config.host,
       sessions: discovery.getSessions().length,
     },
-    "Claude Relay daemon started",
+    "Claude Conduit daemon started",
   );
 
   // Graceful shutdown

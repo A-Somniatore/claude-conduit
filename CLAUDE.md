@@ -1,10 +1,10 @@
-# CLAUDE.md - Claude Relay
+# CLAUDE.md - Claude Conduit
 
 > **Quick reference for Claude/Copilot when working on this repository.**
 
 ## Project Overview
 
-Claude Relay is a mobile remote session manager for Claude Code. It lets you access and continue Claude Code sessions from an iPad/iPhone over your network.
+Claude Conduit is a mobile remote session manager for Claude Code. It lets you access and continue Claude Code sessions from an iPad/iPhone over your network.
 
 **Components:**
 - **Relay Daemon** (`daemon/`) — Node.js service running on Mac. Discovers Claude sessions, manages tmux lifecycle, bridges WebSocket to terminal via node-pty.
@@ -19,7 +19,7 @@ Claude Relay is a mobile remote session manager for Claude Code. It lets you acc
 | Terminal | node-pty (PTY ↔ tmux attach) |
 | File watching | chokidar |
 | Auth | Pre-shared key (PSK) |
-| Config | YAML (~/.config/claude-relay/config.yaml) |
+| Config | YAML (~/.config/claude-conduit/config.yaml) |
 | Types | TypeScript 5.7 strict |
 | Mobile (Phase 2) | React Native 0.76+, xterm.js in WebView |
 
@@ -33,7 +33,7 @@ npx tsc --noEmit    # Type check
 ## Project Structure
 
 ```
-claude-relay/
+claude-conduit/
 ├── CLAUDE.md               # This file
 ├── package.json            # Workspace root
 ├── daemon/                 # Relay daemon
@@ -60,7 +60,7 @@ claude-relay/
 │   │   ├── uninstall-service.sh # Remove LaunchAgent
 │   │   └── restart-service.sh   # Restart daemon
 │   └── launchd/
-│       └── com.somniatore.claude-relay.plist  # Template (reference only)
+│       └── com.somniatore.claude-conduit.plist  # Template (reference only)
 └── mobile/                 # Phase 2
 
 ```
@@ -97,7 +97,7 @@ npm run dev          # tsx watch mode
 
 ## Configuration
 
-Config at `~/.config/claude-relay/config.yaml` (auto-generated on first run with random PSK):
+Config at `~/.config/claude-conduit/config.yaml` (auto-generated on first run with random PSK):
 
 ```yaml
 port: 7860

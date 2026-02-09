@@ -93,7 +93,7 @@ export function SetupScreen() {
     } catch {
       updateCheck(2, {
         status: 'fail',
-        detail: 'Invalid relay key — check ~/.config/claude-relay/config.yaml',
+        detail: 'Invalid relay key — check ~/.config/claude-conduit/config.yaml',
       });
       setIsValidating(false);
       return;
@@ -142,7 +142,7 @@ export function SetupScreen() {
             style={styles.input}
             value={psk}
             onChangeText={setPsk}
-            placeholder="From ~/.config/claude-relay/config.yaml"
+            placeholder="From ~/.config/claude-conduit/config.yaml"
             placeholderTextColor={colors.textMuted}
             autoCapitalize="none"
             autoCorrect={false}

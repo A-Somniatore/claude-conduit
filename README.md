@@ -1,8 +1,8 @@
-# Claude Relay
+# Claude Conduit
 
 Monitor and interact with your [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions from your iPhone — remotely, over your network.
 
-Claude Relay runs a lightweight daemon on your Mac that discovers all your Claude Code sessions, then bridges them to a mobile app via WebSocket. You get a full terminal view with xterm.js, so you see exactly what you'd see on your Mac.
+Claude Conduit runs a lightweight daemon on your Mac that discovers all your Claude Code sessions, then bridges them to a mobile app via WebSocket. You get a full terminal view with xterm.js, so you see exactly what you'd see on your Mac.
 
 **Use cases:**
 - Kick off a long Claude Code task, walk away, check progress from your phone
@@ -46,8 +46,8 @@ The daemon discovers sessions from `~/.claude/projects/` JSONL files, manages tm
 ### 1. Install the daemon
 
 ```bash
-git clone https://github.com/A-Somniatore/claude-relay.git
-cd claude-relay/daemon
+git clone https://github.com/A-Somniatore/claude-conduit.git
+cd claude-conduit/daemon
 npm install
 npm run build
 ```
@@ -61,12 +61,12 @@ npm run install-service
 This installs a macOS LaunchAgent that:
 - Starts the daemon automatically on login
 - Restarts it if it crashes (with 10s throttle)
-- Logs to `~/Library/Logs/claude-relay/`
+- Logs to `~/Library/Logs/claude-conduit/`
 
 After install, you'll see your connection info:
 
 ```
-  Config: ~/.config/claude-relay/config.yaml
+  Config: ~/.config/claude-conduit/config.yaml
   PSK:    <your-relay-key>
 
   Connect your mobile app with:
@@ -76,7 +76,7 @@ After install, you'll see your connection info:
 
 ### 3. Connect the mobile app
 
-Open the Claude Relay app on your iPhone and enter:
+Open the Claude Conduit app on your iPhone and enter:
 - **Host:** Your Mac's IP address + port (e.g., `192.168.1.50:7860`)
 - **Key:** The PSK shown during install
 
@@ -89,7 +89,7 @@ For remote access outside your LAN, use a VPN (Tailscale, WireGuard, etc.) or an
 curl http://localhost:7860/api/status
 
 # View logs
-tail -f ~/Library/Logs/claude-relay/daemon.log
+tail -f ~/Library/Logs/claude-conduit/daemon.log
 
 # Restart (after code update or config change)
 npm run restart-service
@@ -117,7 +117,7 @@ npm run install-service
 
 ## Configuration
 
-Config lives at `~/.config/claude-relay/config.yaml` (auto-generated on first run):
+Config lives at `~/.config/claude-conduit/config.yaml` (auto-generated on first run):
 
 ```yaml
 port: 7860
@@ -225,8 +225,8 @@ All endpoints except `/api/status` require `Authorization: Bearer <psk>`.
 
 **Daemon won't start:**
 ```bash
-tail -20 ~/Library/Logs/claude-relay/daemon.log
-tail -20 ~/Library/Logs/claude-relay/daemon.err.log
+tail -20 ~/Library/Logs/claude-conduit/daemon.log
+tail -20 ~/Library/Logs/claude-conduit/daemon.err.log
 ```
 
 **Port already in use:**
@@ -240,7 +240,7 @@ npm run restart-service
 - Verify daemon is running: `curl http://localhost:7860/api/status`
 - Check your Mac's IP: `ifconfig | grep inet`
 - Ensure your phone and Mac are on the same network (or connected via VPN)
-- Verify PSK matches: `grep psk ~/.config/claude-relay/config.yaml`
+- Verify PSK matches: `grep psk ~/.config/claude-conduit/config.yaml`
 
 **No sessions showing:**
 - Claude Code must have been used at least once (creates JSONL files in `~/.claude/projects/`)

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Claude Relay — Install macOS LaunchAgent
+# Claude Conduit — Install macOS LaunchAgent
 # Runs the daemon automatically on login and restarts on crash.
 
-LABEL="com.somniatore.claude-relay"
+LABEL="com.somniatore.claude-conduit"
 PLIST_PATH="$HOME/Library/LaunchAgents/$LABEL.plist"
-LOG_DIR="$HOME/Library/Logs/claude-relay"
-CONFIG_FILE="$HOME/.config/claude-relay/config.yaml"
+LOG_DIR="$HOME/Library/Logs/claude-conduit"
+CONFIG_FILE="$HOME/.config/claude-conduit/config.yaml"
 DAEMON_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-echo "Claude Relay — Service Installer"
+echo "Claude Conduit — Service Installer"
 echo "================================="
 echo ""
 

@@ -26,5 +26,5 @@ What you expected to happen.
 
 **Logs**
 ```
-Paste relevant logs from ~/Library/Logs/claude-relay/daemon.log
+Paste relevant logs from ~/Library/Logs/claude-conduit/daemon.log
 ```

@@ -1,5 +1,5 @@
 {
-  "name": "claude-relay",
+  "name": "claude-conduit",
   "private": true,
   "workspaces": ["daemon"]
 }

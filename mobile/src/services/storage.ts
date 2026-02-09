@@ -2,8 +2,8 @@ import * as Keychain from 'react-native-keychain';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { Session } from '../types/session';
 
-const KEYCHAIN_SERVICE = 'com.somniatore.claude-relay';
-const SESSIONS_CACHE_KEY = '@claude-relay/sessions-cache';
+const KEYCHAIN_SERVICE = 'com.somniatore.claude-conduit';
+const SESSIONS_CACHE_KEY = '@claude-conduit/sessions-cache';
 
 interface StoredConfig {
   daemonHost: string;

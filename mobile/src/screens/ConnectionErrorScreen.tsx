@@ -41,7 +41,7 @@ export function ConnectionErrorScreen() {
 
         <Text style={styles.title}>Cannot reach your Mac</Text>
         <Text style={styles.subtitle}>
-          Make sure the Claude Relay daemon is running and your device can reach
+          Make sure the Claude Conduit daemon is running and your device can reach
           it over the network.
         </Text>
 

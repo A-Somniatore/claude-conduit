@@ -29,7 +29,7 @@ export interface RelayConfig {
   projectDirs: string[];
 }
 
-const CONFIG_DIR = join(homedir(), ".config", "claude-relay");
+const CONFIG_DIR = join(homedir(), ".config", "claude-conduit");
 const CONFIG_PATH = join(CONFIG_DIR, "config.yaml");
 
 function defaults(): RelayConfig {
@@ -73,7 +73,7 @@ export function loadConfig(): RelayConfig {
     // Generate a random PSK and write example config
     const psk = randomBytes(32).toString("base64url");
     config.auth.psk = psk;
-    const exampleYaml = `# Claude Relay Daemon Configuration
+    const exampleYaml = `# Claude Conduit Daemon Configuration
 port: ${config.port}
 host: "${config.host}"
 auth:
