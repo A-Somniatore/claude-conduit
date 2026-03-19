@@ -1,3 +1,10 @@
+> **⚠️ Deprecated:** This project is no longer maintained. Claude now has built-in remote session support. Use:
+> ```
+> claude /remote-control
+> ```
+
+---
+
 # Claude Conduit
 
 Monitor and interact with your [Claude Code](https://docs.anthropic.com/en/docs/claude-code) sessions from your iPhone — remotely, over your network.
